@@ -8,6 +8,7 @@ import Graphics.Implicit.Export.Render.Definitions
 import GHC.Exts (groupWith)
 import Data.List (sortBy)
 import Data.VectorSpace 
+import Data.AffineSpace.Point
 
 cleanLoopsFromSegs :: [Polyline] -> [Polyline]
 cleanLoopsFromSegs =
@@ -29,14 +30,14 @@ joinSegs (present:remaining) =
 			(Nothing, _) -> present:(joinSegs remaining)
 			(Just match, others) -> joinSegs $ (present ++ tail match): others
 
-reducePolyline ((x1,y1):(x2,y2):(x3,y3):others) = 
-	if (x1,y1) == (x2,y2) then reducePolyline ((x2,y2):(x3,y3):others) else
+reducePolyline (P (x1,y1):P (x2,y2):P (x3,y3):others) = 
+	if (x1,y1) == (x2,y2) then reducePolyline (P (x2,y2):P (x3,y3):others) else
 	if abs ( (y2-y1)/(x2-x1) - (y3-y1)/(x3-x1) ) < 0.0001 
 	   || ( (x2-x1) == 0 && (x3-x1) == 0 && (y2-y1)*(y3-y1) > 0)
-	then reducePolyline ((x1,y1):(x3,y3):others)
-	else (x1,y1) : reducePolyline ((x2,y2):(x3,y3):others)
-reducePolyline ((x1,y1):(x2,y2):others) = 
-	if (x1,y1) == (x2,y2) then reducePolyline ((x2,y2):others) else (x1,y1):(x2,y2):others
+	then reducePolyline (P (x1,y1):P (x3,y3):others)
+	else P (x1,y1) : reducePolyline (P (x2,y2):P (x3,y3):others)
+reducePolyline (P (x1,y1):P (x2,y2):others) = 
+	if (x1,y1) == (x2,y2) then reducePolyline (P (x2,y2):others) else P (x1,y1):P (x2,y2):others
 reducePolyline l = l
 
 polylineNotNull (a:l) = not (null l)

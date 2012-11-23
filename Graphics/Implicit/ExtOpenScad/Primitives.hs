@@ -23,6 +23,7 @@ import           Data.Either (either)
 import qualified Control.Monad as Monad
        
 import Data.VectorSpace
+import Data.AffineSpace.Point
 
 primitives :: [(String, [OVal] -> ArgParser (IO [OVal]) )]
 primitives = [ sphere, cube, square, cylinder, circle, polygon, union, difference, intersect, translate, scale, rotate, extrude, pack, shell, rotateExtrude, unit ]
@@ -87,7 +88,7 @@ cube = moduleWithoutSuite "cube" $ do
 	test "cube(size=[2,3,4]);"
 		`eulerCharacteristic` 2
 
-	addObj3 $ Prim.rect3R r (x1, y1, z1) (x2, y2, z2)
+	addObj3 $ Prim.rect3R r (P (x1, y1, z1)) (P (x2, y2, z2))
 
 
 
@@ -131,7 +132,7 @@ square = moduleWithoutSuite "square" $ do
 	test "square(size=[2,3]);"
 		`eulerCharacteristic` 0
 
-	addObj2 $ Prim.rectR r (x1, y1) (x2, y2)
+	addObj2 $ Prim.rectR r (P (x1, y1)) (P (x2, y2))
 
 
 
@@ -178,7 +179,7 @@ cylinder = moduleWithoutSuite "cylinder" $ do
 		then let
 			obj2 = if fn  < 0 then Prim.circle r else Prim.polygonR 0 $
 				let sides = fromIntegral fn 
-				in [(r*cos θ, r*sin θ )| θ <- [2*pi*n/sides | n <- [0.0 .. sides - 1.0]]]
+				in [P (r*cos θ, r*sin θ) | θ <- [2*pi*n/sides | n <- [0.0 .. sides - 1.0]]]
 			obj3 = Prim.extrudeR 0 obj2 dh
 		in shift $ obj3
 		else shift $ Prim.cylinder2 r1 r2 dh
@@ -202,13 +203,13 @@ circle = moduleWithoutSuite "circle" $ do
 		then Prim.circle r
 		else Prim.polygonR 0 $
 			let sides = fromIntegral fn 
-			in [(r*cos θ, r*sin θ )| θ <- [2*pi*n/sides | n <- [0.0 .. sides - 1.0]]]
+			in [P (r*cos θ, r*sin θ) | θ <- [2*pi*n/sides | n <- [0.0 .. sides - 1.0]]]
 
 polygon = moduleWithoutSuite "polygon" $ do
 	
 	example "polygon ([(0,0), (0,10), (10,0)]);"
 	
-	points :: [ℝ2] <-  argument "points" 
+	points :: [𝔼2] <-  argument "points" 
 	                    `doc` "vertices of the polygon"
 	paths :: [ℕ ]  <- argument "paths" 
 	                    `doc` "order to go through vertices; ignored for now"

@@ -16,11 +16,13 @@ import Data.Storable.Endian
 
 import Prelude hiding (replicate)
 import Data.VectorSpace
+import Data.AffineSpace.Point
+import Data.AffineSpace
 import Data.Cross hiding (normal)
 
-normal :: (ℝ3,ℝ3,ℝ3) -> ℝ3
+normal :: (𝔼3,𝔼3,𝔼3) -> ℝ3
 normal (a,b,c) =
-    normalized $ (b + negateV a) `cross3` (c + negateV a)
+    normalized $ (b .-. a) `cross3` (c .-. a)
 
 stl triangles = toLazyText $ stlHeader <> mconcat (map triangle triangles) <> stlFooter
     where
@@ -28,9 +30,9 @@ stl triangles = toLazyText $ stlHeader <> mconcat (map triangle triangles) <> st
         stlFooter = "endsolid ImplictCADExport\n"
         vector :: ℝ3 -> Builder
         vector (x,y,z) = bf x <> " " <> bf y <> " " <> bf z
-        vertex :: ℝ3 -> Builder
-        vertex v = "vertex " <> vector v
-        triangle :: (ℝ3, ℝ3, ℝ3) -> Builder
+        vertex :: 𝔼3 -> Builder
+        vertex (P v) = "vertex " <> vector v
+        triangle :: (𝔼3, 𝔼3, 𝔼3) -> Builder
         triangle (a,b,c) =
                 "facet normal " <> vector (normal (a,b,c)) <> "\n"
                 <> "outer loop\n"
@@ -49,7 +51,7 @@ binaryStl triangles = toLazyByteString $ header <> lengthField <> mconcat (map t
     where header = fromByteString $ replicate 80 0
           lengthField = fromWord32le $ toEnum $ length triangles
           triangle (a,b,c) = normalV (a,b,c) <> point a <> point b <> point c <> fromWord16le 0
-          point (x,y,z) = fromWrite $ float32LE x <> float32LE y <> float32LE z
+          point (P (x,y,z)) = fromWrite $ float32LE x <> float32LE y <> float32LE z
           normalV ps = let (x,y,z) = normal ps
                        in fromWrite $ float32LE x <> float32LE y <> float32LE z
 
@@ -71,8 +73,8 @@ jsTHREE triangles = toLazyText $ header <> vertcode <> facecode <> footer
                          ,"Shape.prototype = new THREE.Geometry();\n"
                          ,"Shape.prototype.constructor = Shape;\n" ]
                 -- A vertex line; v (0.0, 0.0, 1.0) = "v(0.0,0.0,1.0);\n"
-                v :: ℝ3 -> Builder
-                v (x,y,z) = "v(" <> bf x <> "," <> bf y <> "," <> bf z <> ");\n"
+                v :: 𝔼3 -> Builder
+                v (P (x,y,z)) = "v(" <> bf x <> "," <> bf y <> "," <> bf z <> ");\n"
                 -- A face line
                 f :: Int -> Int -> Int -> Builder
                 f posa posb posc = 
