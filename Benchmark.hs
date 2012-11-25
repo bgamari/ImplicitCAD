@@ -3,6 +3,8 @@ import Graphics.Implicit
 import Graphics.Implicit.Export.SymbolicObj2
 import Graphics.Implicit.Export.SymbolicObj3
 import Graphics.Implicit.Primitives
+import Data.AffineSpace
+import Data.AffineSpace.Point
 
 obj2d_1 :: SymbolicObj2
 obj2d_1 =
@@ -23,7 +25,7 @@ object2 = squarePipe (10,10,10) 1 100
 	where squarePipe (x,y,z) diameter precision =
 			  union
 			  $ map (\start-> translate start
-							$ rect3R 0 (0,0,0) (diameter,diameter,diameter)
+							$ rect3R 0 origin (P (diameter,diameter,diameter))
 					)
 			  $ zip3 (map (\n->(n/precision)*x) [0..precision])
 					 (map (\n->(n/precision)*y) [0..precision])
@@ -32,8 +34,8 @@ object2 = squarePipe (10,10,10) 1 100
 object3 :: SymbolicObj3
 object3 =
     difference
-        [ rect3R 1 (-1,-1,-1) (1,1,1)
-        , rect3R 1 (0,0,0) (2,2,2)
+        [ rect3R 1 (P (-1,-1,-1)) (P (1,1,1))
+        , rect3R 1 (P (0,0,0)) (P (2,2,2))
         ]
 
 obj2Benchmarks :: String -> SymbolicObj2 -> Benchmark
