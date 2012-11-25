@@ -1,11 +1,7 @@
 -- Implicit CAD. Copyright (C) 2011, Christopher Olah (chris@colah.ca)
 -- Released under the GNU GPL, see LICENSE
 
-{-# LANGUAGE ParallelListComp #-}
-
 module Graphics.Implicit.Export.Render where
-
-import Debug.Trace
 
 import Graphics.Implicit.Definitions
 import Graphics.Implicit.Export.Render.Definitions
@@ -15,21 +11,21 @@ import Data.AffineSpace.Point
 -- Here's the plan for rendering a cube (the 2D case is trivial):
 
 -- (1) We calculate midpoints using interpolate.
---     This guarentees that our mesh will line up everywhere.
---     (Contrast with calculating them in getSegs)
+--	   This guarentees that our mesh will line up everywhere.
+--	   (Contrast with calculating them in getSegs)
 
 import Graphics.Implicit.Export.Render.Interpolate (interpolate)
 
 -- (2) We calculate the segments separating the inside and outside of our
---     object on the sides of the cube.
---     getSegs internally uses refine from RefineSegs to subdivide the segs
---     to better match the boundary.
+--	   object on the sides of the cube.
+--	   getSegs internally uses refine from RefineSegs to subdivide the segs
+--	   to better match the boundary.
 
 import Graphics.Implicit.Export.Render.GetSegs (getSegs, getSegs')
 -- import Graphics.Implicit.Export.Render.RefineSegs (refine)
 
 -- (3) We put the segments from all sides of the cube together
---     and extract closed loops.
+--	   and extract closed loops.
 
 import Graphics.Implicit.Export.Render.GetLoops (getLoops)
 
@@ -61,9 +57,15 @@ import Control.Parallel.Strategies (using, rdeepseq, parListChunk)
 -- All in all, this is kind of ugly. But it is necessary.
 
 -- Note: As far as the actual results of the rendering algorithm, nothing in
---       this file really matters. All the actual decisions about how to build
---       the mesh are abstracted into the imported files. They are likely what
---       you are interested in.
+--		 this file really matters. All the actual decisions about how to build
+--		 the mesh are abstracted into the imported files. They are likely what
+--		 you are interested in.
+
+import Data.Array.Repa (Array, Z(..), (:.)(..), DIM3, ix3, DIM2, ix2)
+import qualified Data.Array.Repa as A
+import qualified Data.Array.Repa.Repr.Vector as A
+import qualified Data.Array.Repa.Unsafe as A
+import Control.Monad.Identity (runIdentity)
 
 getMesh :: 𝔼3 -> 𝔼3 -> ℝ -> Obj3 -> TriangleMesh
 getMesh p1 p2 res obj = 
@@ -81,118 +83,115 @@ getMesh p1 p2 res obj =
 		ry = dy/fromIntegral ny
 		rz = dz/fromIntegral nz
 
-		l ! (a,b,c) = l !! c !! b !! a
+		-- (0) Evaluate obj to avoid repeated computation
+		indexToPos :: DIM3 -> 𝔼3
+		indexToPos (Z:.x:.y:.z) = p1 .+^ ( rx*fromIntegral x
+										 , ry*fromIntegral y
+										 , rz*fromIntegral z)
 
-		pZs = [ z1 + rz*n | n <- [0.. fromIntegral nz] ]
-		pYs = [ y1 + ry*n | n <- [0.. fromIntegral ny] ]
-		pXs = [ x1 + rx*n | n <- [0.. fromIntegral nx] ]
+		objV :: Array A.U DIM3 ℝ
+		objV = runIdentity $ A.computeP
+			   $ A.fromFunction (ix3 (nx+3) (ny+3) (nz+3)) (obj . indexToPos)
 
+		-- (1) Calculate mid-points on X, Y, and Z axis in 3D space.
 
-		{-# INLINE par3DList #-}
-		par3DList lenx leny lenz f = 
-			[[[f 
-				(\n -> x1 + rx*fromIntegral (mx+n)) mx 
-				(\n -> y1 + ry*fromIntegral (my+n)) my 
-				(\n -> z1 + rz*fromIntegral (mz+n)) mz
-			| mx <- [0..lenx] ] | my <- [0..leny] ] | mz <- [0..lenz] ] 
-				`using` (parListChunk (max 1 $ div lenz 32) rdeepseq)
+		mids :: DIM3 -> (𝔼3 -> Float) -> (𝔼3 -> Float -> 𝔼3) -> (DIM3 -> DIM3)
+			 -> Array A.U DIM3 Float
+		mids size posToCoord coordToPos neighbor =
+			A.deepSeqArray objV
+			$ runIdentity $ A.computeP
+			$ A.unsafeTraverse objV (const size)
+			$ \lookupObj p -> let
+								  coord = posToCoord . indexToPos
+								  n = neighbor p
+							  in interpolate (coord p, lookupObj p)
+											 (coord n, lookupObj n)
+											 (obj . coordToPos (indexToPos p))
+											 res
 
+		midsX = mids (ix3 nx (ny+1) (nz+1))
+					 (\(P (x,y,z))->x)
+					 (\(P (x,y,z)) x'->P (x',y,z))
+					 (\(Z:.x:.y:.z)->ix3 (x+1) y z)
 
-		-- Evaluate obj to avoid waste in mids, segs, later.
+		midsY = mids (ix3 (nx+1) ny (nz+1))
+					 (\(P (x,y,z))->y)
+					 (\(P (x,y,z)) y'->P (x,y',z))
+					 (\(Z:.x:.y:.z)->ix3 x (y+1) z)
 
-		objV = par3DList (nx+2) (ny+2) (nz+2) $ \x _ y _ z _ -> obj $ P (x 0, y 0, z 0)
+		midsZ = mids (ix3 (nx+1) (ny+1) nz)
+					 (\(P (x,y,z))->z)
+					 (\(P (x,y,z)) z'->P (x,y,z'))
+					 (\(Z:.x:.y:.z)->ix3 x y (z+1))
 
-		-- (1) Calculate mid poinsts on X, Y, and Z axis in 3D space.
+		-- (2) Calculate segments for each side
 
-		midsZ = [[[
-				 interpolate (z0, objX0Y0Z0) (z1, objX0Y0Z1) (appAB obj x0 y0) res
-				 | x0 <- pXs |                  objX0Y0Z0 <- objY0Z0 | objX0Y0Z1 <- objY0Z1
-				]| y0 <- pYs |                  objY0Z0 <- objZ0 | objY0Z1 <- objZ1
-				]| z0 <- pZs | z1 <- tail pZs | objZ0   <- objV  | objZ1   <- tail objV
-				] `using` (parListChunk (max 1 $ div nz 32) rdeepseq)
+		segs :: DIM3
+			 -> (𝔼3 -> (𝔼2, ℝ))
+			 -> (ℝ -> 𝔼2 -> 𝔼3)
+			 -> (DIM3 -> DIM3) -> A.Array A.U DIM3 Float
+			 -> (DIM3 -> DIM3) -> A.Array A.U DIM3 Float
+			 -> Array A.V DIM3 [[𝔼3]]
+		segs size project expand neighA midsA neighB midsB =
+			A.deepSeqArrays [midsX, midsY, midsZ]
+			$ runIdentity $ A.computeP
+			$ A.unsafeTraverse3 objV midsA midsB (\_ _ _ -> size)
+			$ \lookupObj lookupMidA lookupMidB p ->
+				let
+					(p0, c0) = project $ indexToPos p
+					(p1, _)  = project $ indexToPos $ neighA $ neighB p
+				in map (map $ expand c0)
+				   $ getSegs p0 p1
+							 (obj . expand c0)
+							 ( lookupObj p
+							 , lookupObj $ neighA p
+							 , lookupObj $ neighB p
+							 , lookupObj $ neighA $ neighB p
+							 )
+							 ( lookupMidB $ p, lookupMidB $ neighA p
+							 , lookupMidA $ p, lookupMidA $ neighB p
+							 )
 
-		midsY = [[[
-				 interpolate (y0, objX0Y0Z0) (y1, objX0Y1Z0) (appAC obj x0 z0) res
-				 | x0 <- pXs |                  objX0Y0Z0 <- objY0Z0 | objX0Y1Z0 <- objY1Z0
-				]| y0 <- pYs | y1 <- tail pYs | objY0Z0 <- objZ0 | objY1Z0 <- tail objZ0
-				]| z0 <- pZs |                  objZ0   <- objV 
-				] `using` (parListChunk (max 1 $ div nz 32) rdeepseq)
+		neighX (Z:.x:.y:.z) = ix3 (x+1)	 y	   z
+		neighY (Z:.x:.y:.z) = ix3  x	(y+1)  z
+		neighZ (Z:.x:.y:.z) = ix3  x	 y	  (z+1)
 
-		midsX = [[[
-				 interpolate (x0, objX0Y0Z0) (x1, objX1Y0Z0) (appBC obj y0 z0) res
-				 | x0 <- pXs | x1 <- tail pXs | objX0Y0Z0 <- objY0Z0 | objX1Y0Z0 <- tail objY0Z0
-				]| y0 <- pYs |                  objY0Z0 <- objZ0 
-				]| z0 <- pZs |                  objZ0   <- objV 
-				] `using` (parListChunk (max 1 $ div nz 32) rdeepseq)
+		segsX = let
+					project (P (x,y,z)) = (P (y,z), x)
+					expand x (P (y,z))	= P (x,y,z)
+					size = ix3 (nx+1) ny nz
+				in segs size project expand neighY midsY neighZ midsZ
 
-		-- Calculate segments for each side
+		segsY = let
+					project (P (x,y,z)) = (P (x,z), y)
+					expand y (P (x,z))	= P (x,y,z)
+					size = ix3 nx (ny+1) nz
+				in segs size project expand neighX midsX neighZ midsZ
 
-		segsZ = [[[ 
-			map2  (inj3 z0) $ getSegs (P (x0,y0)) (P (x1,y1)) (obj **$ z0)
-			    (objX0Y0Z0, objX1Y0Z0, objX0Y1Z0, objX1Y1Z0)
-			    (midA0, midA1, midB0, midB1)
-			 |x0<-pXs|x1<-tail pXs|midB0<-mX'' |midB1<-mX'T    |midA0<-mY'' |midA1<-tail mY''
-			 |objX0Y0Z0<-objY0Z0|objX1Y0Z0<-tail objY0Z0|objX0Y1Z0<-objY1Z0|objX1Y1Z0<-tail objY1Z0
-			]|y0<-pYs|y1<-tail pYs|mX'' <-mX'  |mX'T <-tail mX'|mY'' <-mY'
-			 |objY0Z0 <- objZ0 | objY1Z0 <- tail objZ0
-			]|z0<-pZs             |mX'  <-midsX|                mY'  <-midsY
-			 |objZ0 <- objV
-			] `using` (parListChunk (max 1 $ div nz 32) rdeepseq)
-
-		segsY = [[[ 
-			map2  (inj2 y0) $ getSegs (P (x0,z0)) (P (x1,z1)) (obj *$* y0) 
-			     (objX0Y0Z0,objX1Y0Z0,objX0Y0Z1,objX1Y0Z1)
-			     (midA0, midA1, midB0, midB1)
-			 |x0<-pXs|x1<-tail pXs|midB0<-mB'' |midB1<-mBT'      |midA0<-mA'' |midA1<-tail mA''
-			 |objX0Y0Z0<-objY0Z0|objX1Y0Z0<-tail objY0Z0|objX0Y0Z1<-objY0Z1|objX1Y0Z1<-tail objY0Z1
-			]|y0<-pYs|             mB'' <-mB'  |mBT' <-mBT       |mA'' <-mA'
-			 |objY0Z0 <- objZ0 | objY0Z1 <- objZ1
-			]|z0<-pZs|z1<-tail pZs|mB'  <-midsX|mBT  <-tail midsX|mA'  <-midsZ 
-			 |objZ0 <- objV | objZ1 <- tail objV
-			] `using` (parListChunk (max 1 $ div nz 32) rdeepseq)
-
-		segsX = 
-			[[[ 
-			map2  (inj1 x0) $ getSegs (P (y0,z0)) (P (y1,z1)) (obj $** x0) 
-			     (objX0Y0Z0,objX0Y1Z0,objX0Y0Z1,objX0Y1Z1)
-			     (midA0, midA1, midB0, midB1)
-			 |x0<-pXs|             midB0<-mB'' |midB1<-mBT'      |midA0<-mA'' |midA1<-mA'T
-			 |objX0Y0Z0<-objY0Z0|objX0Y1Z0<-    objY1Z0|objX0Y0Z1<-objY0Z1|objX0Y1Z1<-     objY1Z1
-			]|y0<-pYs|y1<-tail pYs|mB'' <-mB'  |mBT' <-mBT       |mA'' <-mA'  |mA'T <-tail mA'
-			 |objY0Z0  <-objZ0  |objY1Z0  <-tail objZ0  |objY0Z1  <-objZ1  |objY1Z1  <-tail objZ1  
-			]|z0<-pZs|z1<-tail pZs|mB'  <-midsY|mBT  <-tail midsY|mA'  <-midsZ 
-			 |objZ0 <- objV | objZ1 <- tail objV
-			]  `using` (parListChunk (max 1 $ div nz 32) rdeepseq)
+		segsZ = let
+					project (P (x,y,z)) = (P (x,y), z)
+					expand z (P (x,y))	= P (x,y,z)
+					size = ix3 nx ny (nz+1)
+				in segs size project expand neighX midsX neighY midsY
 
 		-- (3) & (4) : get and tesselate loops
- 
-		sqTris = [[[
-		    concat $ map (tesselateLoop res obj) $ getLoops $ concat [
-		                segX''',
-		           mapR segX''T,
-		           mapR segY''',
-		                segY'T',
-		                segZ''',
-		           mapR segZT''
-		        ]
-
-			 | segZ'''<- segZ''| segZT''<- segZT'
-			 | segY'''<- segY''| segY'T'<- segY'T
-			 | segX'''<- segX''| segX''T<- tail segX''
-
-			]| segZ'' <- segZ' | segZT' <- segZT
-			 | segY'' <- segY' | segY'T <- tail segY'
-			 | segX'' <- segX'
-
-			]| segZ'  <- segsZ | segZT  <- tail segsZ
-			 | segY' <- segsY
-			 | segX' <- segsX
-			]
+		sqTris :: Array A.V DIM3 [TriSquare]
+		sqTris =
+		   A.deepSeqArrays [segsX, segsY, segsZ]
+		   $ runIdentity $ A.computeP
+		   $ A.unsafeTraverse3 segsX segsY segsZ (\_ _ _ -> ix3 nx ny nz)
+		   $ \lookupSegX lookupSegY lookupSegZ p@(Z:.x:.y:.z) ->
+				 concatMap (tesselateLoop res obj)
+				 $ getLoops $ concat
+				 $ [		lookupSegX $ ix3  x	   y	 z
+				   , mapR $ lookupSegX $ ix3 (x+1) y	 z
+				   , mapR $ lookupSegY $ ix3  x	   y	 z
+				   ,		lookupSegY $ ix3  x	  (y+1)	 z
+				   ,		lookupSegZ $ ix3  x	   y	 z
+				   , mapR $ lookupSegZ $ ix3  x	   y	(z+1)
+				   ]
 	
-	in mergedSquareTris $ concat $ concat $ concat sqTris -- (5) merge squares, etc
-
-
-
+	in mergedSquareTris $ concat $ A.toList sqTris -- (5) merge squares, etc
 
 getContour :: 𝔼2 -> 𝔼2 -> ℝ -> Obj2 -> [Polyline]
 getContour p1@(P (x1,y1)) p2@(P (x2,y2)) res obj = 
@@ -206,97 +205,58 @@ getContour p1@(P (x1,y1)) p2@(P (x2,y2)) res obj =
 		rx = dx/fromIntegral nx
 		ry = dy/fromIntegral ny
 
-		l ! (a,b) = l !! b !! a
-
-		pYs = [ y1 + ry*n | n <- [0.. fromIntegral ny] ]
-		pXs = [ x1 + rx*n | n <- [0.. fromIntegral nx] ]
-
-
-		{-# INLINE par2DList #-}
-		par2DList lenx leny f = 
-			[[ f
-				(\n -> x1 + rx*fromIntegral (mx+n)) mx 
-				(\n -> y1 + ry*fromIntegral (my+n)) my
-			| mx <- [0..lenx] ] | my <- [0..leny] ]
-				`using` (parListChunk (max 1 $ div leny 32) rdeepseq)
-
-
 		-- Evaluate obj to avoid waste in mids, segs, later.
+		indexToPos :: DIM2 -> 𝔼2
+		indexToPos (Z:.x:.y) = p1 .+^ ( rx*fromIntegral x
+									  , ry*fromIntegral y
+									  )
 
-		objV = par2DList (nx+2) (ny+2) $ \x _ y _ -> obj $ P (x 0, y 0)
+		objV :: Array A.U DIM2 ℝ
+		objV = runIdentity $ A.computeP
+			   $ A.fromFunction (ix2 (nx+2) (ny+2)) (obj . indexToPos)
 
 		-- (1) Calculate mid poinsts on X, Y, and Z axis in 3D space.
 
-		midsY = [[
-				 interpolate (y0, objX0Y0) (y1, objX0Y1) (obj $* x0) res
-				 | x0 <- pXs |                  objX0Y0 <- objY0   | objX0Y1 <- objY1
-				]| y0 <- pYs | y1 <- tail pYs | objY0   <- objV    | objY1   <- tail objV
-				] `using` (parListChunk (max 1 $ div ny 32) rdeepseq)
+		mids :: (𝔼2 -> Float) -> (𝔼2 -> Float -> 𝔼2) -> (DIM2 -> DIM2)
+			 -> Array A.U DIM2 Float
+		mids posToCoord coordToPos neighbor =
+			runIdentity $ A.computeP
+			$ A.traverse objV (\_ -> ix2 nx ny)
+			$ \lookupObj p -> let
+								coord = posToCoord . indexToPos
+								n = neighbor p
+							  in interpolate (coord p, lookupObj p)
+											 (coord n, lookupObj n)
+											 (obj . coordToPos (indexToPos p))
+											 res
 
-		midsX = [[
-				 interpolate (x0, objX0Y0) (x1, objX1Y0) (obj *$ y0) res
-				 | x0 <- pXs | x1 <- tail pXs | objX0Y0 <- objY0 | objX1Y0 <- tail objY0
-				]| y0 <- pYs |                  objY0   <- objV 
-				] `using` (parListChunk (max 1 $ div ny 32) rdeepseq)
+		midsX = mids (\(P (x,y))->x)
+					 (\(P (x,y)) x'->P (x',y))
+					 (\(Z:.x:.y)->ix2 (x+1) y)
+
+		midsY = mids (\(P (x,y))->y)
+					 (\(P (x,y)) y'->P (x,y'))
+					 (\(Z:.x:.y)->ix2 x (y+1))
 
 		-- Calculate segments for each side
 
-		segs = [[ 
-			getSegs (P (x0,y0)) (P (x1,y1)) obj
-			    (objX0Y0, objX1Y0, objX0Y1, objX1Y1)
-			    (midA0, midA1, midB0, midB1)
-			 |x0<-pXs|x1<-tail pXs|midB0<-mX'' |midB1<-mX'T    |midA0<-mY'' |midA1<-tail mY''
-			 |objX0Y0<-objY0|objX1Y0<-tail objY0|objX0Y1<-objY1|objX1Y1<-tail objY1
-			]|y0<-pYs|y1<-tail pYs|mX'' <-midsX|mX'T <-tail midsX|mY'' <-midsY
-			 |objY0 <- objV  | objY1 <- tail objV
-			] `using` (parListChunk (max 1 $ div ny 32) rdeepseq)
+		segs :: Array A.V DIM2 [[𝔼2]]
+		segs =
+			runIdentity $ A.computeP 
+			$ A.traverse3 objV midsX midsY (\_ _ _ -> ix2 nx ny)
+			$ \lookupObj lookupMidX lookupMidY p0@(Z:.x:.y) ->
+				  let p1 = ix2 (x+1) (y+1)
+				  in getSegs (indexToPos p0) (indexToPos p1) obj
+							 ( lookupObj $ ix2	x	  y
+							 , lookupObj $ ix2 (x+1)  y
+							 , lookupObj $ ix2	x	 (y+1)
+							 , lookupObj $ ix2 (x+1) (y+1)
+							 )
+							 ( lookupMidY p0, lookupMidY p1
+							 , lookupMidX p0, lookupMidX p1
+							 )
 
-	in concat $ concat $ segs -- (5) merge squares, etc
+	in concat $ A.toList segs -- (5) merge squares, etc
 
-
-
-
--- silly utility functions
-
-inj1 a (P (b,c)) = P (a,b,c)
-inj2 b (P (a,c)) = P (a,b,c)
-inj3 c (P (a,b)) = P (a,b,c)
-
-infixr 0 $**
-infixr 0 *$*
-infixr 0 **$
-infixr 0 $*
-infixr 0 *$
-f $* a = \b -> f $ P (a,b)
-f *$ b = \a -> f $ P (a,b)
-f $** a = \(P (b,c)) -> f $ P (a,b,c)
-f *$* b = \(P (a,c)) -> f $ P (a,b,c)
-f **$ c = \(P (a,b)) -> f $ P (a,b,c)
-
-appAB f a b = \c -> f $ P (a,b,c)
-appBC f b c = \a -> f $ P (a,b,c)
-appAC f a c = \b -> f $ P (a,b,c)
-
-map2 f = map (map f)
-map2R f = map (reverse . map f)
 mapR = map reverse
 
-{-
-lagzip a = zip a (tail a)
-tupzip (a,b) = zip a b
-tupzip3 (a,b,c) = zip3 a b c
-
-zipD2 a b = map tupzip $ zip a b
-zipD3 a b = map (map tupzip) . map tupzip $ zip a b
-
-zip3D3 a b c = map (map tupzip3) . map tupzip3 $ zip3 a b c
-
-lag3s02 = map (map tupzip) . map tupzip . lagzip
-lag3s12 = map (map tupzip) . map lagzip
-lag3s22 = map (map lagzip)
-
-lag3 :: [[[a]]] -> [[[(a,a)]]]
-lag3 a = zipD3 a $ map (map tail) $ map tail $ tail a
-
-for3 = flip (map . map . map)
--}
