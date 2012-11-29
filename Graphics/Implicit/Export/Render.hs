@@ -1,6 +1,8 @@
 -- Implicit CAD. Copyright (C) 2011, Christopher Olah (chris@colah.ca)
 -- Released under the GNU GPL, see LICENSE
 
+{-# LANGUAGE TypeFamilies #-}
+
 module Graphics.Implicit.Export.Render where
 
 import Graphics.Implicit.Definitions
@@ -67,8 +69,58 @@ import qualified Data.Array.Repa.Repr.Vector as A
 import qualified Data.Array.Repa.Unsafe as A
 import Control.Monad.Identity (runIdentity)
 
+import Data.VectorSpace
+
+data R2 = R2 {-# UNPACK #-} !Float {-# UNPACK #-} !Float
+		deriving (Show, Eq)
+
+r2 (x,y)  = R2 x y
+unR2 (R2 x y) = (x,y)
+
+instance AdditiveGroup R2 where
+    zeroV = R2 0 0
+    R2 x y ^+^ R2 x' y' = R2 (x+x') (y+y')
+    negateV (R2 x y) = R2 (-x) (-y)
+
+instance VectorSpace R2 where
+	type Scalar R2 = Float
+	a *^ R2 x y = R2 (a*x) (a*y)
+
+instance InnerSpace R2 where
+	R2 x y <.> R2 x' y' = x*x' + y*y'
+
+type P2 = Point R2
+
+p2ToE2 = P . unR2 . unPoint
+e2ToP2 = P . r2 . unPoint
+
+data R3 = R3 {-# UNPACK #-} !Float
+			 {-# UNPACK #-} !Float
+			 {-# UNPACK #-} !Float
+		deriving (Show, Eq)
+
+r3 (x,y,z) = R3 x y z
+unR3 (R3 x y z) = (x,y,z)
+
+instance AdditiveGroup R3 where
+    zeroV = R3 0 0 0
+    R3 x y z ^+^ R3 x' y' z' = R3 (x+x') (y+y') (z+z')
+    negateV (R3 x y z) = R3 (-x) (-y) (-z)
+
+instance VectorSpace R3 where
+	type Scalar R3 = Float
+	a *^ R3 x y z = R3 (a*x) (a*y) (a*z)
+
+instance InnerSpace R3 where
+	R3 x y z <.> R3 x' y' z' = x*x' + y*y' + z*z'
+
+type P3 = Point R3
+
+p3ToE3 = P . unR3 . unPoint
+e3ToP3 = P . r3 . unPoint
+
 getMesh :: 𝔼3 -> 𝔼3 -> ℝ -> Obj3 -> TriangleMesh
-getMesh p1 p2 res obj = 
+getMesh p1 p2 res obj =
 	let
 		(dx,dy,dz) = p2 .-. p1
 		P (x1,y1,z1) = p1
@@ -84,18 +136,19 @@ getMesh p1 p2 res obj =
 		rz = dz/fromIntegral nz
 
 		-- (0) Evaluate obj to avoid repeated computation
-		indexToPos :: DIM3 -> 𝔼3
-		indexToPos (Z:.x:.y:.z) = p1 .+^ ( rx*fromIntegral x
-										 , ry*fromIntegral y
-										 , rz*fromIntegral z)
+		indexToPos :: DIM3 -> P3
+		indexToPos (Z:.x:.y:.z) = P (r3 (x1,y1,z1))
+								.+^ r3 ( rx*fromIntegral x
+									   , ry*fromIntegral y
+									   , rz*fromIntegral z)
 
 		objV :: Array A.U DIM3 ℝ
 		objV = runIdentity $ A.computeP
-			   $ A.fromFunction (ix3 (nx+3) (ny+3) (nz+3)) (obj . indexToPos)
+			   $ A.fromFunction (ix3 (nx+3) (ny+3) (nz+3)) (obj . p3ToE3 . indexToPos)
 
 		-- (1) Calculate mid-points on X, Y, and Z axis in 3D space.
 
-		mids :: DIM3 -> (𝔼3 -> Float) -> (𝔼3 -> Float -> 𝔼3) -> (DIM3 -> DIM3)
+		mids :: DIM3 -> (P3 -> Float) -> (P3 -> Float -> P3) -> (DIM3 -> DIM3)
 			 -> Array A.U DIM3 Float
 		mids size posToCoord coordToPos neighbor =
 			A.deepSeqArray objV
@@ -106,32 +159,32 @@ getMesh p1 p2 res obj =
 								  n = neighbor p
 							  in interpolate (coord p, lookupObj p)
 											 (coord n, lookupObj n)
-											 (obj . coordToPos (indexToPos p))
+											 (obj . p3ToE3 . coordToPos (indexToPos p))
 											 res
 
 		midsX = mids (ix3 nx (ny+1) (nz+1))
-					 (\(P (x,y,z))->x)
-					 (\(P (x,y,z)) x'->P (x',y,z))
+					 (\(P (R3 x y z))->x)
+					 (\(P (R3 x y z)) x'->P $ r3 (x',y,z))
 					 (\(Z:.x:.y:.z)->ix3 (x+1) y z)
 
 		midsY = mids (ix3 (nx+1) ny (nz+1))
-					 (\(P (x,y,z))->y)
-					 (\(P (x,y,z)) y'->P (x,y',z))
+					 (\(P (R3 x y z))->y)
+					 (\(P (R3 x y z)) y'->P $ r3 (x,y',z))
 					 (\(Z:.x:.y:.z)->ix3 x (y+1) z)
 
 		midsZ = mids (ix3 (nx+1) (ny+1) nz)
-					 (\(P (x,y,z))->z)
-					 (\(P (x,y,z)) z'->P (x,y,z'))
+					 (\(P (R3 x y z))->z)
+					 (\(P (R3 x y z)) z'->P $ r3 (x,y,z'))
 					 (\(Z:.x:.y:.z)->ix3 x y (z+1))
 
 		-- (2) Calculate segments for each side
 
 		segs :: DIM3
-			 -> (𝔼3 -> (𝔼2, ℝ))
-			 -> (ℝ -> 𝔼2 -> 𝔼3)
+			 -> (P3 -> (P2, ℝ))
+			 -> (ℝ -> P2 -> P3)
 			 -> (DIM3 -> DIM3) -> A.Array A.U DIM3 Float
 			 -> (DIM3 -> DIM3) -> A.Array A.U DIM3 Float
-			 -> Array A.V DIM3 [[𝔼3]]
+			 -> Array A.V DIM3 [[P3]]
 		segs size project expand neighA midsA neighB midsB =
 			A.deepSeqArrays [midsX, midsY, midsZ]
 			$ runIdentity $ A.computeP
@@ -140,9 +193,9 @@ getMesh p1 p2 res obj =
 				let
 					(p0, c0) = project $ indexToPos p
 					(p1, _)  = project $ indexToPos $ neighA $ neighB p
-				in map (map $ expand c0)
-				   $ getSegs p0 p1
-							 (obj . expand c0)
+				in map (map $ expand c0 . e2ToP2)
+				   $ getSegs (p2ToE2 p0) (p2ToE2 p1)
+							 (obj . p3ToE3 . expand c0 . e2ToP2)
 							 ( lookupObj p
 							 , lookupObj $ neighA p
 							 , lookupObj $ neighB p
@@ -157,20 +210,20 @@ getMesh p1 p2 res obj =
 		neighZ (Z:.x:.y:.z) = ix3  x	 y	  (z+1)
 
 		segsX = let
-					project (P (x,y,z)) = (P (y,z), x)
-					expand x (P (y,z))	= P (x,y,z)
+					project (P (R3 x y z)) = (P $ r2 (y,z), x)
+					expand x (P (R2 y z)) = P $ r3 (x,y,z)
 					size = ix3 (nx+1) ny nz
 				in segs size project expand neighY midsY neighZ midsZ
 
 		segsY = let
-					project (P (x,y,z)) = (P (x,z), y)
-					expand y (P (x,z))	= P (x,y,z)
+					project (P (R3 x y z)) = (P $ r2 (x,z), y)
+					expand y (P (R2 x z)) = P $ r3 (x,y,z)
 					size = ix3 nx (ny+1) nz
 				in segs size project expand neighX midsX neighZ midsZ
 
 		segsZ = let
-					project (P (x,y,z)) = (P (x,y), z)
-					expand z (P (x,y))	= P (x,y,z)
+					project (P (R3 x y z)) = (P $ r2 (x,y), z)
+					expand z (P (R2 x y)) = P $ r3 (x,y,z)
 					size = ix3 nx ny (nz+1)
 				in segs size project expand neighX midsX neighY midsY
 
@@ -181,8 +234,9 @@ getMesh p1 p2 res obj =
 		   $ runIdentity $ A.computeP
 		   $ A.unsafeTraverse3 segsX segsY segsZ (\_ _ _ -> ix3 nx ny nz)
 		   $ \lookupSegX lookupSegY lookupSegZ p@(Z:.x:.y:.z) ->
-				 concatMap (tesselateLoop res obj)
+				   concatMap (tesselateLoop res obj)
 				 $ getLoops $ concat
+				 $ (map (map (map p3ToE3)))
 				 $ [		lookupSegX $ ix3  x	   y	 z
 				   , mapR $ lookupSegX $ ix3 (x+1) y	 z
 				   , mapR $ lookupSegY $ ix3  x	   y	 z
@@ -206,18 +260,19 @@ getContour p1@(P (x1,y1)) p2@(P (x2,y2)) res obj =
 		ry = dy/fromIntegral ny
 
 		-- Evaluate obj to avoid waste in mids, segs, later.
-		indexToPos :: DIM2 -> 𝔼2
-		indexToPos (Z:.x:.y) = p1 .+^ ( rx*fromIntegral x
+		indexToPos :: DIM2 -> P2
+		indexToPos (Z:.x:.y) = P (r2 (x1,y1))
+							   .+^ r2 ( rx*fromIntegral x
 									  , ry*fromIntegral y
 									  )
 
 		objV :: Array A.U DIM2 ℝ
 		objV = runIdentity $ A.computeP
-			   $ A.fromFunction (ix2 (nx+2) (ny+2)) (obj . indexToPos)
+			   $ A.fromFunction (ix2 (nx+2) (ny+2)) (obj . p2ToE2 . indexToPos)
 
 		-- (1) Calculate mid poinsts on X, Y, and Z axis in 3D space.
 
-		mids :: (𝔼2 -> Float) -> (𝔼2 -> Float -> 𝔼2) -> (DIM2 -> DIM2)
+		mids :: (P2 -> Float) -> (P2 -> Float -> P2) -> (DIM2 -> DIM2)
 			 -> Array A.U DIM2 Float
 		mids posToCoord coordToPos neighbor =
 			runIdentity $ A.computeP
@@ -227,15 +282,15 @@ getContour p1@(P (x1,y1)) p2@(P (x2,y2)) res obj =
 								n = neighbor p
 							  in interpolate (coord p, lookupObj p)
 											 (coord n, lookupObj n)
-											 (obj . coordToPos (indexToPos p))
+											 (obj . p2ToE2 . coordToPos (indexToPos p))
 											 res
 
-		midsX = mids (\(P (x,y))->x)
-					 (\(P (x,y)) x'->P (x',y))
+		midsX = mids (\(P (R2 x y))->x)
+					 (\(P (R2 x y)) x'->P $ r2 (x',y))
 					 (\(Z:.x:.y)->ix2 (x+1) y)
 
-		midsY = mids (\(P (x,y))->y)
-					 (\(P (x,y)) y'->P (x,y'))
+		midsY = mids (\(P (R2 x y))->y)
+					 (\(P (R2 x y)) y'->P $ r2 (x,y'))
 					 (\(Z:.x:.y)->ix2 x (y+1))
 
 		-- Calculate segments for each side
@@ -246,7 +301,7 @@ getContour p1@(P (x1,y1)) p2@(P (x2,y2)) res obj =
 			$ A.traverse3 objV midsX midsY (\_ _ _ -> ix2 nx ny)
 			$ \lookupObj lookupMidX lookupMidY p0@(Z:.x:.y) ->
 				  let p1 = ix2 (x+1) (y+1)
-				  in getSegs (indexToPos p0) (indexToPos p1) obj
+				  in getSegs (p2ToE2 $ indexToPos p0) (p2ToE2 $ indexToPos p1) obj
 							 ( lookupObj $ ix2	x	  y
 							 , lookupObj $ ix2 (x+1)  y
 							 , lookupObj $ ix2	x	 (y+1)
