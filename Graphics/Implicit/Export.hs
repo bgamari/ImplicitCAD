@@ -1,6 +1,8 @@
 -- Implicit CAD. Copyright (C) 2011, Christopher Olah (chris@colah.ca)
 -- Released under the GNU GPL, see LICENSE
 
+{-# LANGUAGE FlexibleContexts #-}
+
 module Graphics.Implicit.Export where
 
 import Graphics.Implicit.Definitions
