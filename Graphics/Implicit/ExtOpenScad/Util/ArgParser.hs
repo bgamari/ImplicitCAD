@@ -9,6 +9,17 @@ import qualified Control.Exception as Ex
 import qualified Data.Map   as Map
 import qualified Data.Maybe as Maybe
 import Control.Monad
+import Control.Applicative
+
+instance Functor ArgParser where
+	fmap f m = pure f <*>  m
+
+instance Applicative ArgParser where
+	pure = return
+	(<*>) = ap
+
+instance Alternative ArgParser where
+	(<|>) = mplus
 
 instance Monad ArgParser where
 
